@@ -5,9 +5,12 @@ const cors = require("cors");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const cookieParser = require("cookie-parser");
+const axios = require("axios");
 const userModel = require("./models/user.js");
 
 const app = express();
+
+// Middlewares
 app.use(express.json());
 app.use(cookieParser());
 
@@ -18,17 +21,18 @@ app.use(
   })
 );
 
-
+// MongoDB Connection
 mongoose
   .connect(process.env.MONGO_URI)
   .then(() => console.log("Connected to MongoDB Atlas"))
   .catch((err) => console.log("DB Connection Error:", err));
 
-
 const JWT_SECRET = process.env.JWT_SECRET;
 
+// Authentication Middleware
 const requireAuth = (req, res, next) => {
   const token = req.cookies.token;
+
   if (!token) return res.status(401).json("Not authenticated");
 
   jwt.verify(token, JWT_SECRET, (err, decoded) => {
@@ -39,7 +43,9 @@ const requireAuth = (req, res, next) => {
   });
 };
 
+// ======================== ROUTES ===========================
 
+// Register
 app.post("/register", async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -53,10 +59,12 @@ app.post("/register", async (req, res) => {
 
     res.json("User registered successfully");
   } catch (err) {
+    console.log(err);
     res.status(500).json("Server error");
   }
 });
 
+// Login
 app.post("/login", async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -71,28 +79,55 @@ app.post("/login", async (req, res) => {
 
     res.cookie("token", token, {
       httpOnly: true,
-      secure: true,
-      sameSite: "none",
+      secure: true,        // for HTTPS
+      sameSite: "none",    // needed for cross-site cookies
     });
 
     res.json("Successfully Logged in");
   } catch (err) {
+    console.log(err);
     res.status(500).json("Server error");
   }
 });
 
+// Get Logged in User
 app.get("/me", requireAuth, async (req, res) => {
   const user = await userModel.findById(req.user.id).select("-password");
   res.json(user);
 });
 
-
+// Logout
 app.post("/logout", (req, res) => {
-  res.clearCookie("token");
+  res.clearCookie("token", {
+    httpOnly: true,
+    secure: true,
+    sameSite: "none",
+  });
   res.json("Logged out");
 });
 
+// =================== NEWS API ROUTE ======================
 
-app.listen(process.env.PORT || 3001, () =>
-  console.log(`Server running on port ${process.env.PORT || 3001}`)
-);
+// Fetch Top Headlines
+app.get("/news", async (req, res) => {
+  try {
+    const { category } = req.query;
+
+    const url = `https://newsapi.org/v2/top-headlines?country=in${
+      category ? `&category=${category}` : ""
+    }&apiKey=${process.env.NEWSAPI_KEY}`;
+
+    const response = await axios.get(url);
+
+    res.json(response.data);
+  } catch (err) {
+    console.log("News API Error:", err);
+    res.status(500).json("Failed to fetch news");
+  }
+});
+
+// ============================================================
+
+app.listen(process.env.PORT || 3001, () => {
+  console.log(`Server running on port ${process.env.PORT || 3001}`);
+});
