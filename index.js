@@ -111,11 +111,66 @@ app.post("/logout", (req, res) => {
 // Fetch Top Headlines
 app.get("/news", async (req, res) => {
   try {
-    const { category } = req.query;
+    const { category, q } = req.query;
 
-    const url = `https://newsapi.org/v2/top-headlines?country=in${
-      category ? `&category=${category}` : ""
-    }&apiKey=${process.env.NEWSAPI_KEY}`;
+    const BASE_URL = "https://newsapi.org/v2";
+    const API_KEY = process.env.NEWSAPI_KEY;
+
+    let url = "";
+
+    // 1️⃣ VALID NEWSAPI CATEGORIES
+    const VALID_CATEGORIES = [
+      "business",
+      "entertainment",
+      "general",
+      "health",
+      "science",
+      "sports",
+      "technology",
+    ];
+
+    // 2️⃣ If category is valid → top-headlines with category
+    if (category && VALID_CATEGORIES.includes(category.toLowerCase())) {
+      url = `${BASE_URL}/top-headlines?country=in&category=${category}&pageSize=100&apiKey=${API_KEY}`;
+    }
+
+    // 3️⃣ If search query exists → everything endpoint
+    else if (q) {
+      url = `${BASE_URL}/everything?q=${encodeURIComponent(
+        q
+      )}&language=en&sortBy=publishedAt&pageSize=100&apiKey=${API_KEY}`;
+    }
+
+    // 4️⃣ If category is Timeline → breaking news logic
+    else if (category === "timeline") {
+      const timelineQuery = "breaking OR latest OR update OR news";
+      url = `${BASE_URL}/everything?q=${encodeURIComponent(
+        timelineQuery
+      )}&language=en&sortBy=publishedAt&pageSize=100&apiKey=${API_KEY}`;
+    }
+
+    // 5️⃣ If category is Startups
+    else if (category === "startups") {
+      const startupQuery =
+        "startup OR funding OR venture OR investor OR incubator OR founders OR unicorn";
+      url = `${BASE_URL}/everything?q=${encodeURIComponent(
+        startupQuery
+      )}&language=en&sortBy=publishedAt&pageSize=100&apiKey=${API_KEY}`;
+    }
+
+    // 6️⃣ If category is Markets
+    else if (category === "markets") {
+      const marketQuery =
+        "market OR stock OR nifty OR sensex OR NSE OR BSE OR inflation OR economy";
+      url = `${BASE_URL}/everything?q=${encodeURIComponent(
+        marketQuery
+      )}&language=en&sortBy=publishedAt&pageSize=100&apiKey=${API_KEY}`;
+    }
+
+    // 7️⃣ Default (All) → top headlines
+    else {
+      url = `${BASE_URL}/top-headlines?country=in&pageSize=100&apiKey=${API_KEY}`;
+    }
 
     const response = await axios.get(url);
 
@@ -125,6 +180,7 @@ app.get("/news", async (req, res) => {
     res.status(500).json("Failed to fetch news");
   }
 });
+
 
 // ============================================================
 
