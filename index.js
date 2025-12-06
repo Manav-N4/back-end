@@ -14,9 +14,10 @@ const app = express();
 app.use(express.json());
 app.use(cookieParser());
 
+const FRONTEND_URL = process.env.FRONTEND_URL || "*";
 app.use(
   cors({
-    origin: process.env.FRONTEND_URL, 
+    origin: FRONTEND_URL,
     credentials: true,
   })
 );
@@ -27,17 +28,15 @@ mongoose
   .then(() => console.log("Connected to MongoDB Atlas"))
   .catch((err) => console.log("DB Connection Error:", err));
 
-const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
 
 // Authentication Middleware
 const requireAuth = (req, res, next) => {
   const token = req.cookies.token;
-
   if (!token) return res.status(401).json("Not authenticated");
 
   jwt.verify(token, JWT_SECRET, (err, decoded) => {
     if (err) return res.status(403).json("Invalid token");
-
     req.user = decoded;
     next();
   });
@@ -49,6 +48,7 @@ const requireAuth = (req, res, next) => {
 app.post("/register", async (req, res) => {
   try {
     const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json("Missing fields");
 
     const existingUser = await userModel.findOne({ email });
     if (existingUser) return res.json("User already exists");
@@ -59,7 +59,11 @@ app.post("/register", async (req, res) => {
 
     res.json("User registered successfully");
   } catch (err) {
-    console.log(err);
+    // handle duplicate key error more gracefully
+    if (err && err.code === 11000) {
+      return res.json("User already exists");
+    }
+    console.log("Register Error:", err);
     res.status(500).json("Server error");
   }
 });
@@ -68,6 +72,7 @@ app.post("/register", async (req, res) => {
 app.post("/login", async (req, res) => {
   try {
     const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json("Missing fields");
 
     const user = await userModel.findOne({ email });
     if (!user) return res.json("User not found");
@@ -77,113 +82,230 @@ app.post("/login", async (req, res) => {
 
     const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: "7d" });
 
-    res.cookie("token", token, {
+    // secure cookie only in production
+    const cookieOptions = {
       httpOnly: true,
-      secure: true,        // for HTTPS
-      sameSite: "none",    // needed for cross-site cookies
-    });
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "none",
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+    };
 
+    res.cookie("token", token, cookieOptions);
     res.json("Successfully Logged in");
   } catch (err) {
-    console.log(err);
+    console.log("Login Error:", err);
     res.status(500).json("Server error");
   }
 });
 
 // Get Logged in User
 app.get("/me", requireAuth, async (req, res) => {
-  const user = await userModel.findById(req.user.id).select("-password");
-  res.json(user);
+  try {
+    const user = await userModel.findById(req.user.id).select("-password");
+    res.json(user);
+  } catch (err) {
+    console.log("Me Error:", err);
+    res.status(500).json("Server error");
+  }
 });
 
 // Logout
 app.post("/logout", (req, res) => {
   res.clearCookie("token", {
     httpOnly: true,
-    secure: true,
+    secure: process.env.NODE_ENV === "production",
     sameSite: "none",
   });
   res.json("Logged out");
 });
 
-// =================== NEWS API ROUTE ======================
+// =================== NEWS API ROUTE (improved, dedupe, category keywords) ======================
 
-// Fetch Top Headlines
 app.get("/news", async (req, res) => {
   try {
     const { category, q } = req.query;
-
     const BASE_URL = "https://newsapi.org/v2";
     const API_KEY = process.env.NEWSAPI_KEY;
+    if (!API_KEY) return res.status(500).json({ error: "Missing NEWSAPI_KEY" });
+
+    // focused keywords for categories to reduce overlap
+    const CATEGORY_KEYWORDS = {
+      technology: [
+        "technology",
+        "tech",
+        "software",
+        "gadgets",
+        "AI",
+        "artificial intelligence",
+        "machine learning",
+        "mobile",
+        "app",
+        "semiconductor",
+      ],
+      sports: [
+        "sport",
+        "cricket",
+        "football",
+        "soccer",
+        "tennis",
+        "IPL",
+        "match",
+        "tournament",
+        "athlete",
+        "score",
+      ],
+      business: [
+        "market",
+        "stock",
+        "finance",
+        "economy",
+        "investment",
+        "IPO",
+        "funding",
+        "bank",
+        "business",
+      ],
+      entertainment: [
+        "entertainment",
+        "movie",
+        "film",
+        "bollywood",
+        "hollywood",
+        "celebrity",
+        "music",
+        "tv",
+        "series",
+      ],
+      health: [
+        "health",
+        "healthcare",
+        "medical",
+        "medicine",
+        "disease",
+        "hospital",
+        "covid",
+        "wellness",
+      ],
+      science: [
+        "science",
+        "research",
+        "space",
+        "NASA",
+        "discovery",
+        "climate",
+        "physics",
+        "biology",
+      ],
+    };
+
+    const buildOrQuery = (arr) => encodeURIComponent(arr.map((s) => `"${s}"`).join(" OR "));
+
+    const dedupeArticles = (articles) => {
+      const seenUrls = new Set();
+      const seenTitles = new Set();
+      const out = [];
+      for (const a of articles) {
+        if (!a || !a.url) continue;
+        const url = a.url.trim();
+        const title = (a.title || "").replace(/\s+/g, " ").trim().toLowerCase();
+        if (seenUrls.has(url)) continue;
+        if (seenTitles.has(title)) continue;
+        seenUrls.add(url);
+        seenTitles.add(title);
+        out.push(a);
+      }
+      return out;
+    };
 
     let url = "";
+    const attempted = [];
 
-    // 1️⃣ VALID NEWSAPI CATEGORIES
-    const VALID_CATEGORIES = [
-      "business",
-      "entertainment",
-      "general",
-      "health",
-      "science",
-      "sports",
-      "technology",
-    ];
-
-    // 2️⃣ If category is valid → top-headlines with category
-    if (category && VALID_CATEGORIES.includes(category.toLowerCase())) {
-      url = `${BASE_URL}/top-headlines?country=in&category=${category}&pageSize=100&apiKey=${API_KEY}`;
+    // 1) If explicit search q provided -> search in title first (strong relevance)
+    if (q) {
+      const qInTitle = encodeURIComponent(q);
+      url = `${BASE_URL}/everything?qInTitle=${qInTitle}&language=en&sortBy=publishedAt&pageSize=100&apiKey=${API_KEY}`;
+      attempted.push({ reason: `qInTitle=${q}`, url });
     }
 
-    // 3️⃣ If search query exists → everything endpoint
-    else if (q) {
-      url = `${BASE_URL}/everything?q=${encodeURIComponent(
-        q
-      )}&language=en&sortBy=publishedAt&pageSize=100&apiKey=${API_KEY}`;
+    // 2) If category is provided, try focused queries
+    if (!q && category) {
+      const cat = category.toLowerCase();
+
+      if (Object.prototype.hasOwnProperty.call(CATEGORY_KEYWORDS, cat)) {
+        const qStrict = buildOrQuery(CATEGORY_KEYWORDS[cat]);
+        url = `${BASE_URL}/everything?qInTitle=${qStrict}&language=en&sortBy=publishedAt&pageSize=100&apiKey=${API_KEY}`;
+        attempted.push({ reason: `category strict (${cat})`, url });
+      } else {
+        // special categories
+        if (cat === "startups") {
+          const qStartup = encodeURIComponent("startup OR funding OR venture OR investor OR unicorn");
+          url = `${BASE_URL}/everything?q=${qStartup}&language=en&sortBy=publishedAt&pageSize=100&apiKey=${API_KEY}`;
+          attempted.push({ reason: "startups", url });
+        } else if (cat === "markets") {
+          const qMarket = encodeURIComponent("market OR stock OR nifty OR sensex OR economy");
+          url = `${BASE_URL}/everything?q=${qMarket}&language=en&sortBy=publishedAt&pageSize=100&apiKey=${API_KEY}`;
+          attempted.push({ reason: "markets", url });
+        } else if (cat === "timeline") {
+          const qTimeline = encodeURIComponent("breaking OR latest OR update OR news");
+          url = `${BASE_URL}/everything?q=${qTimeline}&language=en&sortBy=publishedAt&pageSize=100&apiKey=${API_KEY}`;
+          attempted.push({ reason: "timeline", url });
+        } else {
+          // fallback general
+          url = `${BASE_URL}/everything?q=news&language=en&sortBy=publishedAt&pageSize=100&apiKey=${API_KEY}`;
+          attempted.push({ reason: "default everything", url });
+        }
+      }
     }
 
-    // 4️⃣ If category is Timeline → breaking news logic
-    else if (category === "timeline") {
-      const timelineQuery = "breaking OR latest OR update OR news";
-      url = `${BASE_URL}/everything?q=${encodeURIComponent(
-        timelineQuery
-      )}&language=en&sortBy=publishedAt&pageSize=100&apiKey=${API_KEY}`;
+    // 3) If nothing chosen yet, default to recent news
+    if (!url) {
+      url = `${BASE_URL}/everything?q=news&language=en&sortBy=publishedAt&pageSize=100&apiKey=${API_KEY}`;
+      attempted.push({ reason: "default everything", url });
     }
 
-    // 5️⃣ If category is Startups
-    else if (category === "startups") {
-      const startupQuery =
-        "startup OR funding OR venture OR investor OR incubator OR founders OR unicorn";
-      url = `${BASE_URL}/everything?q=${encodeURIComponent(
-        startupQuery
-      )}&language=en&sortBy=publishedAt&pageSize=100&apiKey=${API_KEY}`;
-    }
-
-    // 6️⃣ If category is Markets
-    else if (category === "markets") {
-      const marketQuery =
-        "market OR stock OR nifty OR sensex OR NSE OR BSE OR inflation OR economy";
-      url = `${BASE_URL}/everything?q=${encodeURIComponent(
-        marketQuery
-      )}&language=en&sortBy=publishedAt&pageSize=100&apiKey=${API_KEY}`;
-    }
-
-    // 7️⃣ Default (All) → top headlines
-    else {
-      url = `${BASE_URL}/top-headlines?country=in&pageSize=100&apiKey=${API_KEY}`;
-    }
-
+    // Fetch primary attempt
     const response = await axios.get(url);
+    let articles = (response.data && response.data.articles) || [];
 
-    res.json(response.data);
+    // If primary attempt returns too few results (< 6) and we used strict title search, try broader query
+    if (articles.length < 6) {
+      const lastAttempt = attempted[attempted.length - 1];
+      if (lastAttempt && lastAttempt.reason.includes("strict") && category) {
+        try {
+          const cat = category.toLowerCase();
+          const broaderQ = encodeURIComponent(CATEGORY_KEYWORDS[cat].join(" OR "));
+          const fallbackUrl = `${BASE_URL}/everything?q=${broaderQ}&language=en&sortBy=publishedAt&pageSize=100&apiKey=${API_KEY}`;
+          const r2 = await axios.get(fallbackUrl);
+          const art2 = (r2.data && r2.data.articles) || [];
+          if (art2.length > articles.length) {
+            attempted.push({ reason: "fallback broader", url: fallbackUrl });
+            articles = art2;
+          }
+        } catch (e) {
+          // ignore fallback errors
+        }
+      }
+    }
+
+    // Deduplicate
+    const cleaned = dedupeArticles(articles);
+
+    // Return cleaned articles
+    return res.json({
+      status: "ok",
+      totalResults: cleaned.length,
+      articles: cleaned,
+      // attempted // uncomment for debug
+    });
   } catch (err) {
-    console.log("News API Error:", err);
+    console.log("News API Error:", err?.response?.data || err.message || err);
     res.status(500).json("Failed to fetch news");
   }
 });
 
-
 // ============================================================
 
-app.listen(process.env.PORT || 3001, () => {
-  console.log(`Server running on port ${process.env.PORT || 3001}`);
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
